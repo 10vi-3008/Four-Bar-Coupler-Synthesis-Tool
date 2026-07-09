@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>4 Point Coupler Synthesis</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #controls {
+            background-color: #eee;
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        button, label {
+            margin-right: 15px;
+            font-size: 14px;
+        }
+        p { margin-top: 0; }
+        canvas {
+            border: 1px solid #333;
+            cursor: crosshair;
+            background-color: #FAFAFA;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>4 point Coupler Curve Synthesis</h2>
+    <p>Graphical method using point position reduction. Drag the blue dots for Hr, A1, Hc</p>
+    
+    <div id="controls">
+        <div style="margin-bottom: 12px; font-size: 14px;">
+            <b>Select C1 to C4 Coordinates (x, y):</b><br/>
+            C1: <input type="number" id="c1x" value="-7" step="0.1" style="width:45px;">, <input type="number" id="c1y" value="0" step="0.1" style="width:45px;"> &nbsp;&nbsp;|&nbsp;&nbsp; 
+            C2: <input type="number" id="c2x" value="-5.6" step="0.1" style="width:45px;">, <input type="number" id="c2y" value="-2.6" step="0.1" style="width:45px;"> <br/>
+            C3: <input type="number" id="c3x" value="-3.6" step="0.1" style="width:45px;">, <input type="number" id="c3y" value="-4.5" step="0.1" style="width:45px;"> &nbsp;&nbsp;|&nbsp;&nbsp; 
+            C4: <input type="number" id="c4x" value="0.7" step="0.1" style="width:45px;">, <input type="number" id="c4y" value="-5.8" step="0.1" style="width:45px;">
+        </div>
+        <label><input type="checkbox" id="showConstructions" checked> Show Construction Lines</label>
+        <label><input type="checkbox" id="branch2"> Swap A2 Branch</label>
+        <label><input type="checkbox" id="branch4" checked> Swap A4 Branch</label>
+        <button id="animBtn">Play Animation</button>
+        <div id="statusMsg" style="margin-top: 15px; font-weight: bold; font-size: 15px;"></div>
+        <div id="lengthsMsg" style="margin-top: 10px; font-family: monospace; font-size: 14px; color: #444;"></div>
+    </div>
+
+    <canvas id="canvas" width="800" height="600"></canvas>
+
+    <script>
+        class vect{
+            constructor(x,y) {this.x=x;this.y=y;}
+            add(v){return new vect(this.x+v.x,this.y+v.y);}
+            sub(v){return new vect(this.x-v.x,this.y-v.y);}
+            mul(s){return new vect(this.x*s,this.y*s);}
+            div(s){return new vect(this.x/s,this.y/s);}
+            mag(){return Math.sqrt(this.x*this.x+this.y*this.y);}
+            dist(v){ 
+                let dx=this.x-v.x;
+                let dy=this.y-v.y;
+                return Math.sqrt(dx*dx+dy*dy);
+            }
+            norm(){return this.mag()===0 ? new vect(0,0) : this.div(this.mag());}
+            rot90(){return new vect(-this.y,this.x);}
+            rotate(ang){
+                const c = Math.cos(ang),s = Math.sin(ang);
+                return new vect(this.x*c-this.y*s, this.x*s + this.y*c);
+            }
+            angle(){return Math.atan2(this.y,this.x);}
+            cross(v){return this.x*v.y-this.y*v.x;}
+        }
+
+        function twocirclesintersection(center1,r1,center2,r2){
+            const d=center1.dist(center2);
+            if(d>r1+r2 || d<Math.abs(r1-r2) || d===0) return [];
+            
+            const a=(r1*r1-r2*r2+d*d)/(2*d);
+            const h2=r1*r1-a*a;
+            if(h2<0) return [];
+            
+            const h=Math.sqrt(h2);
+            const dir=center2.sub(center1).div(d);
+            const p2=center1.add(dir.mul(a));
+            const offset=dir.rot90().mul(h);
+            return [p2.add(offset),p2.sub(offset)];
+        }
+
+        function transformpt(sourceA, sourceC, destA, destC, point) {
+            const anglechange=destC.sub(destA).angle()-sourceC.sub(sourceA).angle();
+            return destA.add(point.sub(sourceA).rotate(anglechange));
+        }
+
+        function circumcenter(A,B,C) {
+            const D=2*(A.x*(B.y-C.y)+B.x*(C.y-A.y)+C.x*(A.y-B.y));
+            if(Math.abs(D)<0.0001) return null;
+            const x=((A.x*A.x+A.y*A.y)*(B.y-C.y)+(B.x*B.x+B.y*B.y)*(C.y-A.y)+(C.x*C.x+C.y*C.y)*(A.y-B.y))/D;
+            const y=((A.x*A.x+A.y*A.y)*(C.x-B.x)+(B.x*B.x+B.y*B.y)*(A.x-C.x)+(C.x*C.x+C.y*C.y)*(B.x-A.x))/D;
+            return new vect(x,y);
+        }
+        let C1=new vect(-7, 0);
+        let C2=new vect(-5.6, -2.6);
+        let C3=new vect(-3.6, -4.5);
+        let C4=new vect(0.7, -5.8);
+        let dragHr=new vect(0, 0);  
+        let dragA1=new vect(0, 0); 
+        let dragHc=new vect(3, 7);  
+        let constructed={};
+        let isanimating=false;
+        let crankang=0;
+        let animationframe=null;
+        let lastb=null;
+        
+        function synthesis(){
+            let data ={};
+            let c13_m=C1.add(C3).div(2);
+            let c13_dir=C3.sub(C1).rot90().norm();
+            let vHr=dragHr.sub(c13_m);
+            data.HR=c13_m.add(c13_dir.mul(vHr.x*c13_dir.x+vHr.y*c13_dir.y));
+            data.A1=dragA1;
+            let angrot=C3.sub(data.HR).angle()-C1.sub(data.HR).angle();
+            data.A3=data.HR.add(data.A1.sub(data.HR).rotate(angrot));
+            data.r=C1.dist(data.A1);
+            data.R=data.HR.dist(data.A1);
+            let a13_m=data.A1.add(data.A3).div(2);
+            let a13_dir;
+            if(data.HR.dist(a13_m)>0.001) {
+                a13_dir=data.HR.sub(a13_m).norm();
+            }else{
+                a13_dir=data.A3.sub(data.A1).rot90().norm();
+            }
+
+            let vHc=dragHc.sub(data.HR);
+            data.HC=data.HR.add(a13_dir.mul(vHc.x*a13_dir.x + vHc.y*a13_dir.y));
+            data.Rc=data.A1.dist(data.HC);
+            let int2=twocirclesintersection(data.HC, data.Rc, C2, data.r);
+            let int4=twocirclesintersection(data.HC, data.Rc, C4, data.r);
+            if(int2.length>0 && int4.length>0){
+                let br2=document.getElementById("branch2").checked ? 1 : 0;
+                let br4=document.getElementById("branch4").checked ? 1 : 0;
+                data.A2=int2.length > 1 ? int2[br2] : int2[0];
+                data.A4=int4.length > 1 ? int4[br4] : int4[0];
+                data.P2=transformpt(data.A2,C2,data.A1,C1,data.HR);
+                data.P4=transformpt(data.A4,C4,data.A1,C1,data.HR);
+                data.B1=circumcenter(data.HR,data.P2,data.P4);
+            }
+
+            if(data.B1){
+                data.linkL1=data.HC.dist(data.HR);
+                data.linkL2=data.Rc;
+                data.linkL3=data.A1.dist(data.B1);
+                data.linkL4=data.HR.dist(data.B1);
+                data.couplerAngOffset=C1.sub(data.A1).angle()-data.B1.sub(data.A1).angle();
+                let lengths=[data.linkL1,data.linkL2,data.linkL3,data.linkL4];
+                lengths.sort((a,b)=>a-b);
+                data.isGrashof=(lengths[0]+lengths[3]<=lengths[1]+lengths[2]);
+                data.isCrankRocker=data.isGrashof && (lengths[0]===data.linkL2);
+
+                data.B2=transformpt(data.A1,C1,data.A2,C2,data.B1);
+                data.B3=transformpt(data.A1,C1,data.A3,C3,data.B1);
+                data.B4=transformpt(data.A1,C1,data.A4,C4,data.B1);
+                
+                let s1=Math.sign(data.B1.sub(data.A1).cross(data.B1.sub(data.HR)));
+                let s2=Math.sign(data.B2.sub(data.A2).cross(data.B2.sub(data.HR)));
+                let s3=Math.sign(data.B3.sub(data.A3).cross(data.B3.sub(data.HR)));
+                let s4=Math.sign(data.B4.sub(data.A4).cross(data.B4.sub(data.HR)));
+                data.branchDefect=!(s1===s2 && s2===s3 && s3===s4);
+
+                let th1=data.A1.sub(data.HC).angle();
+                let th2=data.A2.sub(data.HC).angle();
+                let th3=data.A3.sub(data.HC).angle();
+                let th4=data.A4.sub(data.HC).angle();
+                let mod2pi=(a)=>{let m=a%(2*Math.PI); if(m<0)m+=2*Math.PI; return m;};
+                let sum_ccw=mod2pi(th2-th1)+mod2pi(th3-th2)+mod2pi(th4-th3)+mod2pi(th1-th4);
+                let isOrderCCW=Math.abs(sum_ccw - 2*Math.PI)<0.001;
+                let mod2picw=(a)=>{let m=a%(2*Math.PI); if(m>0)m-=2*Math.PI; return m;};
+                let sum_cw=mod2picw(th2-th1)+mod2picw(th3-th2)+mod2picw(th4-th3)+mod2picw(th1-th4);
+                let isOrderCW=Math.abs(sum_cw - (-2*Math.PI))<0.001;
+                data.orderDefect=!(isOrderCCW || isOrderCW);
+            }
+
+            constructed=data;
+            
+            let statusel=document.getElementById("statusMsg");
+            let lengthsel=document.getElementById("lengthsMsg");
+
+            if(!data.B1){
+                statusel.innerText="Error: Invalid linkage configuration.";
+                statusel.style.color="red";
+                lengthsel.innerText="";
+            }else{
+                let txt=data.isGrashof ? (data.isCrankRocker ? "Grashof (Crank-Rocker)" : "Grashof (Non-Crank-Rocker)") : "Non-Grashof";
+                txt+="   |   ";
+                txt+=data.branchDefect ? "BRANCH DEFECT" : "No Branch Defect";
+                txt+="   |   ";
+                txt+=data.orderDefect ? "ORDER DEFECT" : "Correct Order";
+                statusel.innerText=txt;
+                statusel.style.color=(data.branchDefect || data.orderDefect || !data.isCrankRocker) ? "#d97706" : "green";
+                if(data.branchDefect || data.orderDefect)statusel.style.color="red";
+
+                lengthsel.innerText=`Lengths: L1 (Ground)=${data.linkL1.toFixed(2)} | L2 (Crank)=${data.linkL2.toFixed(2)} | L3 (Coupler)=${data.linkL3.toFixed(2)} | L4 (Rocker)=${data.linkL4.toFixed(2)}`;
+            }
+        }
+
+        const canvas=document.getElementById('canvas');
+        const ctx=canvas.getContext('2d');
+        const scale=18;
+        const origin={x:600,y:200};
+
+        function tx(x){return origin.x+x*scale;}
+        function ty(y){return origin.y-y*scale;}
+        function itx(x){return (x-origin.x)/scale;}
+        function ity(y) {return(origin.y-y)/scale;}
+
+        function drawline(p1,p2,color,width=1,dash=[]){
+            ctx.beginPath();
+            ctx.setLineDash(dash);
+            ctx.moveTo(tx(p1.x),ty(p1.y));
+            ctx.lineTo(tx(p2.x),ty(p2.y));
+            ctx.lineWidth=width;
+            ctx.strokeStyle=color;
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawcircle(c,r,color,dash=[]){
+            ctx.beginPath();
+            ctx.setLineDash(dash);
+            ctx.arc(tx(c.x),ty(c.y),r*scale,0,2*Math.PI);
+            ctx.lineWidth=1;
+            ctx.strokeStyle=color;
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawpoint(p,color,r=5,label=""){
+            ctx.beginPath();
+            ctx.arc(tx(p.x),ty(p.y),r,0,2*Math.PI);
+            ctx.fillStyle=color;
+            ctx.fill();
+            if(label){
+                ctx.fillStyle='#000';
+                ctx.fillText(label,tx(p.x)+8,ty(p.y)-8);
+            }
+        }
+
+        function drawhinge(p,label) {
+            ctx.beginPath();
+            ctx.moveTo(tx(p.x),ty(p.y));
+            ctx.lineTo(tx(p.x)-15,ty(p.y)+15);
+            ctx.lineTo(tx(p.x)+15,ty(p.y)+15);
+            ctx.closePath();
+            ctx.fillStyle='#fff';
+            ctx.fill();
+            ctx.lineWidth=2;
+            ctx.strokeStyle='#000';
+            ctx.stroke();
+
+            for(let i=-10;i<=10;i+=5) {
+                ctx.beginPath();
+                ctx.moveTo(tx(p.x)+i,ty(p.y)+15);
+                ctx.lineTo(tx(p.x)+i-5,ty(p.y)+25);
+                ctx.stroke();
+            }
+
+            drawpoint(p,'black',6);
+            ctx.fillText(label,tx(p.x)-10,ty(p.y)+40);
+        }
+
+        function drawlinkage(A,B,C_pt,data) {
+            drawline(data.HC,data.HR,'grey', 4);
+            drawline(data.HR,B,'purple',4);
+            drawline(data.HC,A,'green',4);
+            
+            ctx.beginPath();
+            ctx.moveTo(tx(A.x),ty(A.y));
+            ctx.lineTo(tx(B.x),ty(B.y));
+            ctx.lineTo(tx(C_pt.x),ty(C_pt.y));
+            ctx.closePath();
+            ctx.fillStyle='rgba(255,0,0,0.2)';
+            ctx.fill();
+            ctx.strokeStyle='red';
+            ctx.lineWidth=2;
+            ctx.stroke();
+            
+            drawpoint(A,'white',5);
+            drawpoint(B,'white',5);
+            drawpoint(C_pt,'red',6);
+        }
+
+        function draw(){
+            ctx.clearRect(0,0,canvas.width,canvas.height);
+            
+            drawline(new vect(-100,0),new vect(100,0),'#ccc',1.5);
+            drawline(new vect(0,-100),new vect(0,100),'#ccc',1.5);
+            ctx.fillStyle='#888';
+            ctx.font='12px Arial';
+            
+            for(let i=-40;i<=40;i+=2){
+                if(i!==0){
+                    drawline(new vect(i,-0.5),new vect(i,0.5),'#aaa');
+                    ctx.fillText(i,tx(i)-6,ty(0)+16);
+                    drawline(new vect(-0.5,i),new vect(0.5,i),'#aaa');
+                    ctx.fillText(i,tx(0)+8,ty(i)+4);
+                }
+            }
+
+            let d=constructed;
+            
+            if(document.getElementById("showConstructions").checked && d.A1){
+                drawcircle(C1,d.r,'lightblue',[5,5]);
+                drawcircle(C3,d.r,'lightblue',[5,5]);
+                drawcircle(d.HR,d.R,'purple',[5,5]);
+                drawcircle(d.HC,d.Rc,'green',[5,5]);
+
+                if(d.P2){
+                    drawpoint(d.P2,'grey',4,'"2"');
+                    drawpoint(d.P4,'grey',4,'"4"');
+                    if(d.B1) drawcircle(d.B1,d.B1.dist(d.HR),'orange',[5,5]);
+                }
+
+                drawpoint(d.A1,'blue',4,'A1');
+                drawpoint(d.A3,'blue',4,'A3');
+            }
+
+            drawpoint(C1,'red',5,'C1');
+            drawpoint(C2,'red',5,'C2');
+            drawpoint(C3,'red',5,'C3');
+            drawpoint(C4,'red',5,'C4');
+
+            if(d.HR && d.HC && d.B1){
+                drawhinge(d.HR,'H_R');
+                drawhinge(d.HC,'H_C');
+
+                if(isanimating){
+                    let A_curr=d.HC.add(new vect(Math.cos(crankang),Math.sin(crankang)).mul(d.Rc));
+                    let bInts=twocirclesintersection(A_curr,d.linkL3,d.HR,d.linkL4);
+                    
+                    if(bInts.length>0){
+                        let B_curr=bInts[0];
+                        if(bInts.length>1 && lastb){
+                            if(bInts[1].dist(lastb)<bInts[0].dist(lastb))B_curr=bInts[1];
+                        } else if (!lastb) {
+                            if(bInts.length>1 && bInts[1].dist(d.B1)<bInts[0].dist(d.B1))B_curr=bInts[1];
+                        }
+                        lastb=B_curr;
+                        
+                        let abAng=B_curr.sub(A_curr).angle();
+                        let cAngTarget=abAng+d.couplerAngOffset;
+                        let C_curr=A_curr.add(new vect(Math.cos(cAngTarget),Math.sin(cAngTarget)).mul(d.r));
+                        
+                        drawlinkage(A_curr,B_curr,C_curr,d);
+                    }else{
+                        drawlinkage(d.A1,d.B1,C1,d);
+                    }
+                }else{
+                    drawlinkage(d.A1,d.B1,C1,d);
+                    lastb=d.B1;
+                }
+            }
+
+            drawpoint(dragA1,'blue',7);
+            if(d.HR)drawpoint(d.HR,'blue',7);
+            if(d.HC)drawpoint(d.HC,'blue',7);
+        }
+
+        function animloop() {
+            if(!isanimating)return;
+            crankang+=0.01;
+            draw();
+            animationframe=requestAnimationFrame(animloop);
+        }
+
+        document.getElementById("showConstructions").addEventListener("change",draw);
+        document.getElementById("branch2").addEventListener("change",() => { synthesis(); draw(); });
+        document.getElementById("branch4").addEventListener("change",() => { synthesis(); draw(); });
+        
+        ['c1x','c1y','c2x','c2y','c3x','c3y','c4x','c4y'].forEach(id => {
+            document.getElementById(id).addEventListener('input', () => {
+                C1.x=parseFloat(document.getElementById("c1x").value) || 0;
+                C1.y=parseFloat(document.getElementById("c1y").value) || 0;
+                C2.x=parseFloat(document.getElementById("c2x").value) || 0;
+                C2.y=parseFloat(document.getElementById("c2y").value) || 0;
+                C3.x=parseFloat(document.getElementById("c3x").value) || 0;
+                C3.y=parseFloat(document.getElementById("c3y").value) || 0;
+                C4.x=parseFloat(document.getElementById("c4x").value) || 0;
+                C4.y=parseFloat(document.getElementById("c4y").value) || 0;
+                synthesis();
+                if(!isanimating)draw();
+            });
+        });
+
+        document.getElementById("animBtn").addEventListener("click",(e) => {
+            isanimating=!isanimating;
+            e.target.innerText=isanimating ? 'Pause Animation' : 'Play Animation';
+            if(isanimating){
+                if(constructed && constructed.A1 && constructed.HC){
+                    crankang=constructed.A1.sub(constructed.HC).angle();
+                }
+                animloop();
+            }else{
+                cancelAnimationFrame(animationframe);
+                draw();
+            }
+        });
+
+        let dragging=null;
+        canvas.addEventListener('mousedown',(e) => {
+            const rect=canvas.getBoundingClientRect();
+            const mouseV=new vect(itx(e.clientX-rect.left),ity(e.clientY-rect.top));
+            
+            if(mouseV.dist(dragA1)<0.6){dragging='A1';return;}
+            if(constructed.HR && mouseV.dist(constructed.HR)<0.6){dragging='HR';return;}
+            if(constructed.HC && mouseV.dist(constructed.HC)<0.6){dragging='HC';return;}
+        });
+
+        window.addEventListener('mousemove',(e) => {
+            if(!dragging)return;
+            const rect=canvas.getBoundingClientRect();
+            const mouseV=new vect(itx(e.clientX - rect.left),ity(e.clientY-rect.top));
+            
+            if(dragging==='A1'){dragA1=mouseV;}
+            if(dragging==='HR'){dragHr=mouseV;}
+            if(dragging==='HC'){dragHc=mouseV;}
+            
+            synthesis();
+            if(!isanimating)draw();
+        });
+
+        window.addEventListener('mouseup',() => {dragging=null;});
+
+        synthesis();
+        draw();
+
+    </script>
+</body>
+</html>

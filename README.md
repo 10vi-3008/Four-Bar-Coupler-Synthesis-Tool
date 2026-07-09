@@ -1,4 +1,4 @@
-4-Point Coupler Curve Synthesis
+# 4-Point Coupler Curve Synthesis
 
 An interactive, single-file HTML tool for graphically synthesizing a four-bar linkage whose coupler point passes through four user-specified precision points (C1–C4), using the classic point-position reduction method.
 
